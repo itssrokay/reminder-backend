@@ -5,9 +5,9 @@ const bcrypt = require('bcrypt');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
-// const fs = require('fs');
-const { OpenAI } = require('openai');
 const fs = require('fs').promises;
+const { OpenAI } = require('openai');
+const jwt = require('jsonwebtoken'); // For authentication
 const User = require('./userModel');
 
 // App config
@@ -16,10 +16,20 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 
-// Suppress Mongoose strictQuery warning
-mongoose.set('strictQuery', true);
+// Ensure the 'uploads' directory exists
+const uploadsDir = path.join(__dirname, 'uploads');
+const checkUploadsDir = async () => {
+  try {
+    await fs.access(uploadsDir); // Check if directory exists
+  } catch (err) {
+    await fs.mkdir(uploadsDir); // Create directory if it doesn't exist
+    console.log(`Directory ${uploadsDir} created!`);
+  }
+};
+checkUploadsDir(); // Ensure the directory exists at startup
 
 // DB config
+mongoose.set('strictQuery', true);
 mongoose.connect(
   'mongodb+srv://itssr:Qwerty123@cluster1.hbgt3yu.mongodb.net/reminderAppDB',
   {
@@ -29,24 +39,22 @@ mongoose.connect(
   () => console.log('DB connected')
 );
 
+// Reminder Schema
 const reminderSchema = new mongoose.Schema({
   reminderMsg: String,
   remindAt: String,
   isReminded: Boolean,
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }
 });
-
 const Reminder = new mongoose.model('reminder', reminderSchema);
 
-
-
-// Multer config
+// Multer config for file uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads/');
+    cb(null, uploadsDir); // Use the resolved 'uploads' directory
   },
   filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname));
+    cb(null, Date.now() + path.extname(file.originalname)); // Generate unique filename
   }
 });
 
@@ -56,7 +64,6 @@ const upload = multer({
     const fileTypes = /jpeg|jpg|png/;
     const extname = fileTypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = fileTypes.test(file.mimetype);
-
     if (mimetype && extname) {
       return cb(null, true);
     } else {
@@ -65,12 +72,13 @@ const upload = multer({
   }
 });
 
-// OpenAI config
+// OpenAI API config
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const jwt = require('jsonwebtoken'); // Add this at the top of your file
+// API routes
+app.use('/uploads', express.static('uploads')); // Serve static files from uploads directory
 
 app.post('/login', async (req, res) => {
   try {
@@ -91,10 +99,6 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// Serve uploaded files statically
-app.use('/uploads', express.static('uploads'));
-
-// API routes
 app.get('/getAllReminder', async (req, res) => {
   const { userId } = req.query;
   try {
@@ -106,19 +110,20 @@ app.get('/getAllReminder', async (req, res) => {
   }
 });
 
-
+// Updated route to handle image uploads and generate reminders with IST time conversion
 app.post('/generateReminder', upload.single('photo'), async (req, res) => {
   console.log("Received request to generate reminder");
 
   if (req.file) {
-    console.log("File received:", req.file); // Log the file details
+    console.log("File received:", req.file);
+
     try {
       // Read the file and convert it to base64
       const imageBuffer = await fs.readFile(req.file.path);
       const base64Image = imageBuffer.toString('base64');
+      console.log("Base64 image length:", base64Image.length);
 
-      console.log("Base64 image length:", base64Image.length); // Log the size of the base64 image
-
+      // OpenAI API call with the updated instruction to convert time to IST
       const response = await openai.chat.completions.create({
         model: "gpt-4o",
         messages: [
@@ -127,19 +132,12 @@ app.post('/generateReminder', upload.single('photo'), async (req, res) => {
             content: [
               { 
                 type: "text", 
-                text: `Analyze the image and extract the reminder message and date/time information. Return a JSON object with the following fields:
-      - 'reminderMsg' for the reminder message.
-      - 'remindAt' for the reminder time.
-
-      Ensure the following when generating the output:
-      1. The 'remindAt' field should be in ISO 8601 format (YYYY-MM-DDTHH:mm:ss.sss without a timezone suffix like 'Z').
-      2. If a date is mentioned but no year is specified, assume the current year.
-      3. If no time is mentioned, assume 09:00 AM by default.
-      4. If the time is provided, ensure it reflects exactly what is mentioned (e.g., if '7 AM' is mentioned, it should be represented as 07:00:00).
-
-      Return only the JSON object, without any additional text or markdown.`
-    },
-
+                text: `Analyze the image and extract the reminder message and date/time. 
+                Convert the extracted time to Indian Standard Time (UTC+05:30) and return a JSON object 
+                with two fields: 'reminderMsg' for the reminder message and 'remindAt' for the reminder time. 
+                The 'remindAt' field should be in ISO 8601 format (YYYY-MM-DDTHH:MM:SS+05:30), 
+                reflecting the time in Indian Standard Time.`
+              },
               {
                 type: "image_url",
                 image_url: {
@@ -152,17 +150,19 @@ app.post('/generateReminder', upload.single('photo'), async (req, res) => {
         max_tokens: 300
       });
 
-      console.log("OpenAI Response:", response.choices[0].message.content); // Log the response
+      // Log the OpenAI response
+      console.log("OpenAI Response:", response.choices[0].message.content);
 
-      // Process and send response
-      const jsonString = response.choices[0].message.content.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-      const reminderData = JSON.parse(jsonString);
+      // Parse the response and convert the reminder time to IST
+      const reminderData = JSON.parse(response.choices[0].message.content.replace(/^```json\s*/, '').replace(/\s*```$/, ''));
 
-      await fs.unlink(req.file.path); // Delete file after processing
+      // Delete the uploaded file after processing
+      await fs.unlink(req.file.path);
 
+      // Create and save the reminder
       const reminder = new Reminder({
         reminderMsg: reminderData.reminderMsg,
-        remindAt: reminderData.remindAt,
+        remindAt: reminderData.remindAt, // The time in IST as per the OpenAI response
         isReminded: false,
         userId: req.body.userId
       });
@@ -175,7 +175,7 @@ app.post('/generateReminder', upload.single('photo'), async (req, res) => {
       });
 
     } catch (error) {
-      console.error("Error processing image with OpenAI:", error); // Log the error
+      console.error("Error processing image with OpenAI:", error);
       res.status(500).send("Error processing image");
     }
   } else {
@@ -183,11 +183,6 @@ app.post('/generateReminder', upload.single('photo'), async (req, res) => {
     res.status(400).send('Image upload failed!');
   }
 });
-// app.get('/aryan',()=>{
-//   console.log("Hello world");
-//   res.send('<h1>hello</h1>')
-// })
-
 
 app.post('/addReminder', async (req, res) => {
   const { reminderMsg, remindAt, userId } = req.body;
@@ -224,36 +219,8 @@ app.post('/deleteReminder', (req, res) => {
     }
   });
 });
-app.post('/signup', async (req, res) => {
-  try {
-    const { name, email, password, role } = req.body;
-    
-    // Check if user already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ message: 'User already exists' });
-    }
 
-    // Hash the password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Create new user
-    const newUser = new User({
-      name,
-      email,
-      password: hashedPassword,
-      role
-    });
-
-    await newUser.save();
-
-    res.status(201).json({ message: 'User created successfully' });
-  } catch (error) {
-    console.error('Signup error:', error);
-    res.status(500).json({ message: 'Error creating user', error: error.message });
-  }
-});
-// Existing reminder checking functionality
+// Reminder checking functionality
 setInterval(() => {
   Reminder.find({}, (err, reminderList) => {
     if (err) {
@@ -294,4 +261,4 @@ setInterval(() => {
 }, 1000);
 
 const PORT = process.env.PORT || 9000;
-app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`Server started on port ${PORT}`));
