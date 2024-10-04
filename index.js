@@ -98,6 +98,10 @@ app.post('/login', async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 });
+app.get('/test', (req, res) => {
+  res.send('Backend is working! heee');
+});
+
 
 app.get('/getAllReminder', async (req, res) => {
   const { userId } = req.query;
