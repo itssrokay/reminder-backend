@@ -226,7 +226,7 @@ app.post('/deleteReminder', (req, res) => {
 });
 app.post('/signup', async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, password, role, phoneNumber } = req.body; // Add phoneNumber here
     
     // Check if user already exists
     const existingUser = await User.findOne({ email });
@@ -242,7 +242,8 @@ app.post('/signup', async (req, res) => {
       name,
       email,
       password: hashedPassword,
-      role
+      role,
+      phoneNumber // Add this line
     });
 
     await newUser.save();
@@ -255,7 +256,7 @@ app.post('/signup', async (req, res) => {
 });
 // Existing reminder checking functionality
 setInterval(() => {
-  Reminder.find({}, (err, reminderList) => {
+  Reminder.find({}).populate('userId').exec((err, reminderList) => {
     if (err) {
       console.log(err);
     }
@@ -280,9 +281,10 @@ setInterval(() => {
                   .create({
                     body: reminder.reminderMsg,
                     from: 'whatsapp:+14155238886',
-                    to: 'whatsapp:+917033762468',
+                    to: `whatsapp:${reminder.userId.phoneNumber}` // Use the user's phone number
                   })
                   .then((message) => console.log(message.sid))
+                  .catch((error) => console.error('Error sending message:', error))
                   .done();
               }
             );
